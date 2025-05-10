@@ -11,7 +11,7 @@ use language_model::{
     AuthenticateError, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
     LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
     LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
-    LanguageModelToolUse, MessageContent, RateLimiter, Role, StopReason,
+    LanguageModelToolChoice, LanguageModelToolUse, MessageContent, RateLimiter, Role, StopReason,
 };
 use open_router::{Model, ResponseStreamEvent, get_models, stream_completion};
 use schemars::JsonSchema;
@@ -358,7 +358,29 @@ impl LanguageModel for OpenRouterLanguageModel {
     }
 
     fn max_output_tokens(&self) -> Option<u32> {
-        self.model.max_output_tokens()
+        // Get the max_output_tokens potentially configured on the model itself (from open_router dependency's Model struct)
+        let model_configured_max_output = self.model.max_output_tokens();
+        // Get the total context window size for the model
+        let total_context = self.model.max_token_count() as u32;
+
+        // Define a reasonable upper cap for output tokens to prevent requesting the entire context window.
+        // This leaves space for the prompt. 16384 is a sizable but not excessive default max output.
+        let practical_output_cap = std::cmp::min(total_context.saturating_sub(4096), 16384u32); // Ensure at least 4k for prompt, cap output at 16k.
+
+        match model_configured_max_output {
+            Some(configured_max) => {
+                // If the model has a specific max_output_tokens configured,
+                // respect it, but also cap it by our practical_output_cap.
+                Some(std::cmp::min(configured_max, practical_output_cap))
+            }
+            None => {
+                // If the model does not specify a max_output_tokens,
+                // use our practical_output_cap.
+                Some(practical_output_cap)
+            }
+        }
+        // Ensure the result is at least a small number if calculations result in zero or very low.
+        .map(|v| if v == 0 { 256 } else { v })
     }
 
     fn count_tokens(
@@ -386,6 +408,12 @@ impl LanguageModel for OpenRouterLanguageModel {
         let completions = self.stream_completion(request, cx);
         async move { Ok(map_to_language_model_completion_events(completions.await?).boxed()) }
             .boxed()
+    }
+
+    fn supports_tool_choice(&self, _choice: LanguageModelToolChoice) -> bool {
+        // TODO: Determine actual OpenRouter capability for tool choice.
+        // For now, assuming it might not be fully supported or needs specific model checks.
+        false
     }
 }
 
